@@ -220,7 +220,7 @@ static inline void divArrayDouble (ArrayDouble* x, double y) {
     }
 }
 
-const int FILE_LINE_LIMIT = 10000;
+const int FILE_LINE_LIMIT = 100000;
 
 Nodes* readFile(const char* const path) {
     Nodes* res = NULL;
