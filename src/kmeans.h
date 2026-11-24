@@ -1,6 +1,7 @@
 #pragma once 
 
 #include <float.h>
+#include <stdbool.h>
 #include <stdlib.h>
 
 #include "array.h"
@@ -9,18 +10,12 @@ const double CUTOFF = 1e-4;
 
 const int MAX_ITER = 500;
 
-const double MIN_RAND = 1.0f;
-const double MAX_RAND = 100.0f;
-
-
-
-inline double rand_double(int min, int max) {
-    int INT = (rand() % (int)(max - min + 1.0)) + min;
+static inline double rand_double() {
     double DEC = ((double)rand() / (double)RAND_MAX);
-    return INT + DEC;
+    return DEC;
 }
 
-double distance (ArrayDouble* x, ArrayDouble* y) {
+static inline double distance (ArrayDouble* x, ArrayDouble* y) {
     double sum = 0.0;
     if (x && x->arr && y && y->arr && (x->n == y->n)) {
         for (int i = 0; i < x->n; i++) {
@@ -32,14 +27,13 @@ double distance (ArrayDouble* x, ArrayDouble* y) {
 }
 
 
-
 typedef struct {
     Nodes* clusters;
     ArrayInt* cluster_list;
     double cost;
 } KmeansResult;
 
-void freeKmeansResult(KmeansResult* ptr) {
+static inline void freeKmeansResult(KmeansResult* ptr) {
     if (ptr) {
         if (ptr->clusters) {
             freeNodes(ptr->clusters);
@@ -74,32 +68,58 @@ void printKmeansResult(KmeansResult* res, Nodes* datapoints) {
 
 typedef ArrayDouble Node;
 
+// K-means++ initialization: spreads initial centroids across the data distribution
 Nodes* createInitialClusters(const Nodes* const datapoints, int k) {
     Nodes* clusters = newNodes(k);
+    int n = datapoints->n;
+    int features_n = datapoints->list[0].n;
 
-    for (int i = 0; i < k; i++) {
-        int r = rand() % datapoints->n;
-        Node* initial = &datapoints->list[r];
+    double* min_dist = (double*)malloc(n * sizeof(double));
 
-        int j = 0;
+    // First centroid chosen uniformly at random
+    int first = rand() % n;
+    Node* c0 = newArrayDouble(features_n, 0.0);
+    clusters->list[0] = *c0;
+    free(c0);
+    copyArrayDouble(&clusters->list[0], &datapoints->list[first]);
 
-        // Check for duplicates
-        while (j < i && !compareArrayDouble(initial, &clusters->list[j])) 
-        {
-            j++;
+    for (int i = 0; i < n; i++) {
+        min_dist[i] = distance(&datapoints->list[i], &clusters->list[0]);
+    }
+
+    for (int c = 1; c < k; c++) {
+        double sum = 0.0;
+        for (int i = 0; i < n; i++) {
+            sum += min_dist[i];
         }
 
-        Node* tmp = newArrayDouble(initial->n, 0.0);
-        clusters->list[i] = *tmp;
-        free(tmp);
+        int chosen = rand() % n;
+        if (sum > 0.0) {
+            double target = ((double)rand() / (double)RAND_MAX) * sum;
+            double cumulative = 0.0;
+            for (int i = 0; i < n; i++) {
+                cumulative += min_dist[i];
+                if (cumulative >= target) {
+                    chosen = i;
+                    break;
+                }
+            }
+        }
 
-        copyArrayDouble(&clusters->list[i], initial);
+        Node* ci = newArrayDouble(features_n, 0.0);
+        clusters->list[c] = *ci;
+        free(ci);
+        copyArrayDouble(&clusters->list[c], &datapoints->list[chosen]);
 
-        if (j < i) {
-            // Avoid duplicates by adding a random distance to the selected point
-            addArrayDouble(&clusters->list[i], rand_double(MIN_RAND, MAX_RAND));
+        for (int i = 0; i < n; i++) {
+            double d = distance(&datapoints->list[i], &clusters->list[c]);
+            if (d < min_dist[i]) {
+                min_dist[i] = d;
+            }
         }
     }
+
+    free(min_dist);
     return clusters;
 }
 
@@ -152,32 +172,50 @@ KmeansResult* kmeans(const Nodes* const datapoints, int k) {
     double cluster_cost = 0.0;
     ArrayInt* cluster_list = newArrayInt(datapoints->n, -1);
 
+    // Pre-allocate accumulators once instead of on every iteration
+    int features_n = datapoints->list[0].n;
+    Nodes* pos_accumulator = newNodes(k);
+    for (int i = 0; i < k; i++) {
+        Node* tmp = newArrayDouble(features_n, 0.0);
+        pos_accumulator->list[i] = *tmp;
+        free(tmp);
+    }
+    ArrayInt* cluster_count = newArrayInt(k, 0);
+
     int iterations = 0;
     int moves;
+    bool had_empty;
 
     do {
         cluster_cost = 0.0;
+        had_empty = false;
 
-        // Initialize accumulator
-        Nodes* pos_accumulator = newNodes(k);
         for (int i = 0; i < k; i++) {
-            int features_n = datapoints->list[i].n;
-
-            Node* tmp = newArrayDouble(features_n, 0.0);
-            pos_accumulator->list[i] = *tmp;
-            free(tmp);
+            memset(pos_accumulator->list[i].arr, 0, features_n * sizeof(double));
+            cluster_count->arr[i] = 0;
         }
-        ArrayInt* cluster_count = newArrayInt(k, 0);
 
         moves = assignAndCount(datapoints, k, cluster_list, cluster_count, clusters, pos_accumulator);
 
         // Move clusters to the new positions
         for (int i = 0; i < k; i++) {
 
-            // If the cluster is empty, move it randomly
+            // If the cluster is empty, re-initialize it to the datapoint farthest from its centroid
             if (cluster_count->arr[i] == 0) {
-                addArrayDouble(&clusters->list[i], rand_double(MIN_RAND, MAX_RAND));
-
+                int farthest_idx = rand() % datapoints->n;
+                double max_dist = -1.0;
+                for (int p = 0; p < datapoints->n; p++) {
+                    int assigned = cluster_list->arr[p];
+                    if (assigned >= 0) {
+                        double d = distance(&datapoints->list[p], &clusters->list[assigned]);
+                        if (d > max_dist) {
+                            max_dist = d;
+                            farthest_idx = p;
+                        }
+                    }
+                }
+                copyArrayDouble(&clusters->list[i], &datapoints->list[farthest_idx]);
+                had_empty = true;
             } else {
 
                 // Take the average
@@ -187,19 +225,22 @@ KmeansResult* kmeans(const Nodes* const datapoints, int k) {
                 copyArrayDouble(&clusters->list[i], &pos_accumulator->list[i]);
             }
         }
-        freeNodes(pos_accumulator);
-        freeArrayInt(cluster_count);
         iterations++;
 
-    } while ((iterations < MAX_ITER) && (cluster_cost > CUTOFF) && (moves != 0));
+    } while ((iterations < MAX_ITER) && (had_empty || ((cluster_cost > CUTOFF) && (moves != 0))));
+
+    freeNodes(pos_accumulator);
+    freeArrayInt(cluster_count);
 
     // Calculate total cost
     double cost = 0.0;
     for (int i = 0; i < datapoints->n; i++) {
         int which = cluster_list->arr[i];
-        Node cluster = clusters->list[which];
-        double dist = distance(&cluster, &datapoints->list[i]);
-        cost += dist;
+        if (which >= 0) {
+            Node cluster = clusters->list[which];
+            double dist = distance(&cluster, &datapoints->list[i]);
+            cost += dist;
+        }
     }
 
     KmeansResult* res = (KmeansResult*)malloc(sizeof(KmeansResult));

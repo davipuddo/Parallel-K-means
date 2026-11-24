@@ -9,7 +9,7 @@ typedef struct {
     int n;
 } ArrayString;
 
-void freeArrayString(ArrayString* ptr) {
+static inline void freeArrayString(ArrayString* ptr) {
     if (ptr) {
         if (ptr->data) {
             for (int i = 0; i < ptr->n; i++) {
@@ -24,7 +24,7 @@ void freeArrayString(ArrayString* ptr) {
     }
 }
 
-void printArrayString(ArrayString* ptr) {
+static inline void printArrayString(ArrayString* ptr) {
     if (ptr && ptr->data) {
         for (int i = 0; i < ptr->n; i++) {
             if (ptr->data[i]) {
@@ -76,7 +76,7 @@ typedef struct {
     int n;
 } ArrayDouble;
 
-void freeArrayDouble(ArrayDouble* ptr) {
+static inline void freeArrayDouble(ArrayDouble* ptr) {
     if (ptr) {
         if (ptr->arr) {
             free(ptr->arr);
@@ -86,7 +86,7 @@ void freeArrayDouble(ArrayDouble* ptr) {
     }
 }
 
-ArrayDouble* newArrayDouble(int n, double start_val) {
+static inline ArrayDouble* newArrayDouble(int n, double start_val) {
     ArrayDouble* res = NULL;
     if (n > 0) {
         res = (ArrayDouble*)malloc(sizeof(ArrayDouble));
@@ -99,7 +99,7 @@ ArrayDouble* newArrayDouble(int n, double start_val) {
     return res;
 }
 
-void printArrayDouble(ArrayDouble* ptr) {
+static inline void printArrayDouble(ArrayDouble* ptr) {
     if (ptr && ptr->arr) {
         printf("{%lf", ptr->arr[0]);
         for (int i = 1; i < ptr->n; i++) {
@@ -114,7 +114,7 @@ typedef struct {
     int n;
 } ArrayInt;
 
-void freeArrayInt(ArrayInt* ptr) {
+static inline void freeArrayInt(ArrayInt* ptr) {
     if (ptr) {
         if (ptr->arr) {
             free(ptr->arr);
@@ -124,7 +124,7 @@ void freeArrayInt(ArrayInt* ptr) {
     }
 }
 
-ArrayInt* newArrayInt(int n, int start_val) {
+static inline ArrayInt* newArrayInt(int n, int start_val) {
     ArrayInt* res = NULL;
     if (n > 0) {
         res = (ArrayInt*)malloc(sizeof(ArrayInt));
@@ -142,23 +142,17 @@ typedef struct {
     int n;
 } Nodes;
 
-void freeNodes(Nodes* ptr) {
+static inline void freeNodes(Nodes* ptr) {
     if (ptr) {
         if (ptr->list) {
-            for (int i = 0; i < ptr->n; i++) {
-                if (ptr->list[i].arr) {
-                    free(ptr->list[i].arr);
-                    ptr->list[i].n = 0;
-                }
-            }
-            free(ptr->list);
+            freeArrayDouble(ptr->list);
         }
         ptr->n = 0;
         free(ptr);
     }
 }
 
-Nodes* newNodes(int n) {
+static inline Nodes* newNodes(int n) {
     Nodes* res = NULL;
     if (n > 0) {
         res = (Nodes*)malloc(sizeof(Nodes));
@@ -168,7 +162,7 @@ Nodes* newNodes(int n) {
     return res;
 }
 
-void printNodes(Nodes* ptr) {
+static inline void printNodes(Nodes* ptr) {
     if (ptr && ptr->list) {
         for (int i = 0; i < ptr->n; i++) {
             for (int j = 0; j < ptr->list[i].n; j++) {
@@ -180,7 +174,7 @@ void printNodes(Nodes* ptr) {
     }
 }
 
-bool compareArrayDouble (ArrayDouble* x, ArrayDouble* y) {
+static inline bool compareArrayDouble (ArrayDouble* x, ArrayDouble* y) {
     bool res = false;
     if (x && x->arr && y && y->arr && (x->n == y->n)) {
         int i = 0;
@@ -194,7 +188,7 @@ bool compareArrayDouble (ArrayDouble* x, ArrayDouble* y) {
     return res;
 }
 
-void copyArrayDouble (ArrayDouble* dest, ArrayDouble* src) {
+static inline void copyArrayDouble (ArrayDouble* dest, ArrayDouble* src) {
     if (dest && dest->arr && src && src->arr && (dest->n == src->n)) {
         for (int l = 0; l < src->n; l++) {
             dest->arr[l] = src->arr[l];
@@ -202,7 +196,7 @@ void copyArrayDouble (ArrayDouble* dest, ArrayDouble* src) {
     }
 }
 
-void addArrayDouble (ArrayDouble* x, double amount) {
+static inline void addArrayDouble (ArrayDouble* x, double amount) {
     if (x && x->arr) {
         for (int i = 0; i < x->n; i++) {
             x->arr[i] += amount;
@@ -210,7 +204,7 @@ void addArrayDouble (ArrayDouble* x, double amount) {
     }
 }
 
-void sumArrayDouble (ArrayDouble* x, ArrayDouble* y) {
+static inline void sumArrayDouble (ArrayDouble* x, ArrayDouble* y) {
     if (x && x->arr && y && y->arr && (x->n == y->n)) {
         for (int i = 0; i < x->n; i++) {
             x->arr[i] += y->arr[i];
@@ -218,7 +212,7 @@ void sumArrayDouble (ArrayDouble* x, ArrayDouble* y) {
     }
 }
 
-void divArrayDouble (ArrayDouble* x, double y) {
+static inline void divArrayDouble (ArrayDouble* x, double y) {
     if (x && x->arr && y != 0) {
         for (int i = 0; i < x->n; i++) {
             x->arr[i] /= y;
@@ -226,28 +220,44 @@ void divArrayDouble (ArrayDouble* x, double y) {
     }
 }
 
+const int FILE_LINE_LIMIT = 10000;
+
 Nodes* readFile(const char* const path) {
     Nodes* res = NULL;
     if (path) 
     {
         FILE* fp = fopen(path, "r"); 
 
-        char buffer [100];
+        char buffer[4096];
         if (!fp) {
             printf("Error: file could not be opened");
         } 
         else 
         {
-            const int LINES = 21;
-
-            res = newNodes(LINES);
+            int capacity = 1024;
+            res = newNodes(capacity);
 
             int row = 0;
-            while (fgets(buffer, sizeof(buffer), fp))    // buffer = line in the file
+            while (fgets(buffer, sizeof(buffer), fp) && row < FILE_LINE_LIMIT)    // buffer = line in the file
             {
-                int last = (int)strlen(buffer)-1;
-                if (last > 0 && buffer[last] == '\n') {
-                    buffer[last] = '\0';
+                int len = (int)strlen(buffer);
+                while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r')) {
+                    buffer[--len] = '\0';
+                }
+                if (len == 0) {
+                    continue;
+                }
+
+                if (row >= capacity) {
+                    capacity *= 2;
+                    ArrayDouble* grown = (ArrayDouble*)realloc(res->list, capacity * sizeof(ArrayDouble));
+                    if (!grown) {
+                        res->n = row;
+                        freeNodes(res);
+                        fclose(fp);
+                        return NULL;
+                    }
+                    res->list = grown;
                 }
 
                 ArrayString* str_line = split(buffer);   // Split on [,]
@@ -265,6 +275,7 @@ Nodes* readFile(const char* const path) {
                 freeArrayString(str_line);
                 row++;
             }
+            res->n = row;
             fclose(fp);
         }
     }
