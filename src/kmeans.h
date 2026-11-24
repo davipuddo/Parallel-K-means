@@ -2,8 +2,8 @@
 #include <cstdlib>
 #include <vector>
 
-#include "node.hpp"
-
+#include "node.h"
+#include "array.h"
 
 const double CUTOFF = 1e-4;
 
@@ -20,18 +20,9 @@ inline double rand_double(int min, int max) {
 }
 
 struct KmeansResult {
-
-    Nodes clusters;
-    std::vector<int> cluster_list;
+    Nodes* clusters;
+    double* cluster_list;
     double cost;
-
-    KmeansResult() {}
-
-    KmeansResult(Nodes clusters, std::vector<int> cluster_list, double cost)
-        : clusters(clusters), cluster_list(cluster_list), cost(cost) {}
-
-    ~KmeansResult() = default;
-
 };
 
 

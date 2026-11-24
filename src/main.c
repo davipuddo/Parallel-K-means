@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <time.h>
 
-#include "file.h"
+#include "array.h"
 
 const double K_CUTOFF = 0.3;
 const int RUNS = 100;
@@ -25,10 +25,13 @@ int main (int argc, const char** argv) {
 
     srand(time(NULL));
 
-    ArrayDouble* res = readFile("../datasets/test_dataset.txt");
+    Nodes* res = readFile("../datasets/test_dataset.txt");
     if (res && res->data) {
-        for (int i = 0; i < res->i; i++) {
-            printf("[%lf]\n", res->data[i]);
+        for (int i = 0; i < res->row; i++) {
+            for (int j = 0; j < res->col[i]; j++) {
+                printf("[%lf] ", res->data[i][j]);
+            }
+            printf("\n");
         }
         printf("\n");
     }
