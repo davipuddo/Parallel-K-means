@@ -1,6 +1,9 @@
 # Compiled binaries
 src/main
 src/kmeans
+src/seq
+src/cpu
+src/gpu
 *.o
 *.out
 

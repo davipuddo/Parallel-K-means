@@ -145,7 +145,6 @@ static void free_instances(void) {
 // Initializes cluster centers randomly from the loaded instances
 static void initialize_centers(void) {
     srand(3);
-    #pragma omp parallel for
     for (int i = 0; i < K; i++) {
         size_t index = (size_t)(rand() % (int)n_instances);
         for (int j = 0; j < N_ATTRIBUTES; j++) {

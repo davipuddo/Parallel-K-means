@@ -210,8 +210,8 @@ def main():
 
     rel = os.path.relpath(args.output, os.path.join(os.path.dirname(
         os.path.abspath(__file__)), "..", "src"))
-    print(f"\nRun it (the trailing 0 means 'read every row', since main.c "
-          f"defaults to 1M):\n    ./kmeans {rel} 0")
+    print(f"\nRun the sequential baseline on it:\n"
+          f"    cd ../src && make seq && ./seq {rel}")
 
 
 if __name__ == "__main__":
