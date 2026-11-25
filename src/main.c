@@ -10,6 +10,13 @@
 
 const double K_CUTOFF = 0.05;
 const int RUNS = 30;
+const int FILE_LIMIT = 1000000;
+
+double get_monotonic_time(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
 
 int parseArgs(int argc, const char** argv) {
     int k = 0;
@@ -113,7 +120,7 @@ int main (int argc, const char** argv) {
 
     srand(time(NULL));
 
-    Nodes* datapoints = readFile("../datasets/treino_sempayload.csv");
+    Nodes* datapoints = readFile("../datasets/treino_sempayload.csv", FILE_LIMIT);
     if (!datapoints || !datapoints->list || datapoints->n == 0) {
         fprintf(stderr, "Error: initial node configuration is NULL or empty. Aborting!\n");
         return -1;
@@ -133,6 +140,8 @@ int main (int argc, const char** argv) {
 
     KmeansResult* res = NULL;
 
+    clock_t t = clock();
+    double time = get_monotonic_time();
     if (k > 0) {
         res = min_kmeans(datapoints, k, RUNS);
     } else if (k == 0) {
@@ -154,12 +163,16 @@ int main (int argc, const char** argv) {
             cost = new_cost;
         }
     }
+    time = get_monotonic_time() - time;
+    printf("time taken: %lf\n", time);
 
+    /*
     int num_clusters = res->clusters->n;
     int count = evaluateClustering(labels, res->cluster_list, num_clusters);
     printf("K: %d | Mismatches: %d / %d (Accuracy: %.2f%%)\n",
            num_clusters, count, datapoints->n,
            100.0 * (datapoints->n - count) / datapoints->n);
+    */
 
 
     // Cleanup

@@ -220,9 +220,7 @@ static inline void divArrayDouble (ArrayDouble* x, double y) {
     }
 }
 
-const int FILE_LINE_LIMIT = 100000;
-
-Nodes* readFile(const char* const path) {
+Nodes* readFile(const char* const path, int file_limit) {
     Nodes* res = NULL;
     if (path) 
     {
@@ -238,7 +236,7 @@ Nodes* readFile(const char* const path) {
             res = newNodes(capacity);
 
             int row = 0;
-            while (fgets(buffer, sizeof(buffer), fp) && row < FILE_LINE_LIMIT)    // buffer = line in the file
+            while (fgets(buffer, sizeof(buffer), fp) && row < file_limit)    // buffer = line in the file
             {
                 int len = (int)strlen(buffer);
                 while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r')) {
