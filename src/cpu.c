@@ -1,3 +1,38 @@
+/*
+ * OpenMP strong-scaling measurements.
+ *
+ * One run per thread count via OMP_NUM_THREADS, timing only kmeans() with
+ * CLOCK_MONOTONIC (CSV loading is outside the timed region). Every run agreed
+ * on the output: 60.3436% accuracy, clusters of 19244077 and 60755923.
+ *
+ *   Machine : AMD Ryzen 7 8700F, 8 cores / 16 threads, dual-channel DDR5
+ *   Dataset : ../datasets/treino_balanced_big.csv, 80,000,000 rows x 5 attrs
+ *   Build   : gcc -O3 -fopenmp, K = 2, 30 iterations
+ *
+ *   threads       time   speedup   efficiency
+ *   seq (seq.c)  11.896s    1.00x        --
+ *         1      11.890s    1.00x      100.0%
+ *         2       6.680s    1.78x       89.0%
+ *         3       4.992s    2.38x       79.4%
+ *         4       4.683s    2.54x       63.5%
+ *         5       4.570s    2.60x       52.1%
+ *         6       4.549s    2.62x       43.6%
+ *         7       4.581s    2.60x       37.1%
+ *         8       4.582s    2.60x       32.5%
+ *         9       4.580s    2.60x       28.9%
+ *        10       4.481s    2.65x       26.5%   <- best
+ *        11       4.485s    2.65x       24.1%
+ *        12       4.504s    2.64x       22.0%
+ *        13       4.587s    2.59x       19.9%
+ *        14       4.648s    2.56x       18.3%
+ *        15       4.891s    2.43x       16.2%
+ *        16       5.053s    2.35x       14.7%
+ *
+ * Past 13 threads it gets slower: those are SMT siblings sharing one core's
+ * load/store path, so they add contention without adding bandwidth. 1 thread
+ * matching seq.c (11.890s vs 11.896s)
+ */
+
 #define _POSIX_C_SOURCE 199309L
 
 #include <stdio.h>

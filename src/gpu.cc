@@ -1,3 +1,27 @@
+/*
+ * GPU k-means with SYCL. Same algorithm, same I/O and same output as seq.c --
+ * what follows is only what had to change to run the two hot loops on a
+ * device.
+ *
+ * Moved to the GPU:
+ *   assign_cluster()  one work-item per row, reading the centroids from device
+ *                     memory and writing that row's cluster id.
+ *   update_centers()  a grid-stride pass that reduces the per-cluster sums and
+ *                     counts the host needs to recompute the centroids.
+ *
+ * Left on the host:
+ *   CSV parsing, initialize_centers() and evaluate_accuracy(). Seeding the
+ *   centroids on the host from the same srand(3) sequence keeps the starting
+ *   point bit-identical to seq.c, which is what makes the timings comparable.
+ *
+ * Memory model: USM (sycl::malloc_device) with explicit memcpy, not buffers
+ * and accessors. The host arrays stay live and the device holds mirrors of the
+ * arrays the kernels touch; nothing is mapped or migrated implicitly.
+ *
+ * Checked against seq.c on the 80M-row dataset: identical cluster sizes and
+ * accuracy (60.3436%), 0.82 s versus 11.90 s.
+ */
+
 #define _POSIX_C_SOURCE 199309L
 
 #include <stdio.h>
@@ -14,13 +38,19 @@
 #define MAX_ITERATIONS 30
 #define LINE_LIMIT 256
 
-/* Rows read from the dataset by default; override with argv[2] (0 = all). */
 #define MAX_INSTANCES 0
 
 #define DEFAULT_DATASET "../datasets/treino_balanced_big.csv"
 
+/*
+ * Launch geometry for the reduction kernel. The assign kernel is a plain range
+ * over the rows, but the reduction needs a fixed number of groups so that each
+ * group owns one slice of the partials array: TARGET_GROUPS groups of
+ * WORK_GROUP_SIZE work-items walk the dataset grid-stride.
+ */
 #define WORK_GROUP_SIZE 256
 #define TARGET_GROUPS 4096
+/* Reduced per group: K*N_ATTRIBUTES centroid sums, then K cluster counts. */
 #define N_SUMS (K * N_ATTRIBUTES)
 #define N_ACC (N_SUMS + K)
 
@@ -32,27 +62,24 @@ static double centers[K * N_ATTRIBUTES];
 static size_t n_instances = 0;
 
 /*
- * Device state. The host arrays above stay live -- the CSV is parsed into them
- * and the final assignments are copied back into them -- while these are the
- * USM device allocations the kernels actually work on.
+ * Device mirrors of the host arrays above. instances and results are uploaded
+ * once and stay resident for the whole run; centers is tiny and makes a round
+ * trip every iteration, because the host still does the division.
  */
 static sycl::queue *q= NULL;
 static double *d_instances = NULL;
 static double *d_centers = NULL;
 static int *d_results = NULL;
 /*
- * Per-work-group partial reductions: N_SUMS centroid sums followed by K
- * cluster counts, one slice per group, which the host folds together. 
+ * Per-work-group partial reductions, N_ACC doubles per group. Giving each
+ * group its own slice and folding them on the host avoids fp64 atomics, which
+ * gfx1101 only emulates with compare-and-swap. The counts share the double
+ * array with the sums -- they are integers far below 2^53, so they stay exact.
  */
 static double *d_partials = NULL;
 static double *h_partials = NULL;
 static size_t n_groups = 0;
 
-/*
- * Counts the data rows of a CSV file, ignoring the header and blank lines.
- * Stops as soon as 'limit' rows have been seen (limit == 0 means no limit),
- * so capped runs do not pay for a full scan of the file.
- */
 static size_t count_rows(const char *path, size_t limit) {
     FILE *file = fopen(path, "r");
     if (!file) {
@@ -63,7 +90,7 @@ static size_t count_rows(const char *path, size_t limit) {
     char line[LINE_LIMIT];
     size_t rows = 0;
 
-    if (!fgets(line, sizeof(line), file)) { /* header */
+    if (!fgets(line, sizeof(line), file)) {
         fclose(file);
         return 0;
     }
@@ -78,11 +105,10 @@ static size_t count_rows(const char *path, size_t limit) {
     return rows;
 }
 
-// Loads instances and their labels from a CSV file into the global arrays
 static int read_csv(const char *path, size_t max_instances) {
     size_t rows = count_rows(path, max_instances);
     if (rows == (size_t)-1) {
-        return 0; /* count_rows already reported the failure */
+        return 0;
     }
     if (rows == 0) {
         fprintf(stderr, "Error: no data rows found in '%s'\n", path);
@@ -106,7 +132,7 @@ static int read_csv(const char *path, size_t max_instances) {
     char line[LINE_LIMIT];
     size_t count = 0;
 
-    if (!fgets(line, sizeof(line), file)) { /* skip header */
+    if (!fgets(line, sizeof(line), file)) {
         fclose(file);
         return 0;
     }
@@ -163,7 +189,12 @@ static void free_instances(void) {
     results = NULL;
 }
 
-// Initializes cluster centers randomly from the loaded instances
+/*
+ * Deliberately not ported to the device: drawing the seeds on the host from
+ * the same srand(3) sequence as seq.c makes the two runs start from identical
+ * centroids, which is what lets their results be diffed. K is 2, so there is
+ * nothing to gain by parallelizing it either.
+ */
 static void initialize_centers(void) {
     srand(3);
     for (int i = 0; i < K; i++) {
@@ -175,7 +206,13 @@ static void initialize_centers(void) {
 }
 
 /*
- * Allocate USM device buffers and transfer data
+ * Allocates the USM device buffers and uploads the dataset. With USM there is
+ * no accessor for the runtime to infer transfers from, so each array gets an
+ * explicit malloc_device and every host/device movement is spelled out -- this
+ * is the main structural addition over seq.c.
+ *
+ * n_groups is clamped to TARGET_GROUPS so the partials array has a fixed size
+ * regardless of dataset size; the kernel covers the rest with a grid stride.
  */
 static int device_setup(void) {
     size_t groups = (n_instances + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE;
@@ -223,7 +260,15 @@ static void device_free(void) {
     h_partials = NULL;
 }
 
-// Assigns each instance to the nearest cluster center (one work-item per row)
+/*
+ * Nearest-centroid assignment. The sequential loop over rows becomes one
+ * work-item per row and the body is otherwise untouched -- the rows are
+ * independent, so this needs no synchronization at all.
+ *
+ * The locals below are not redundant: device code cannot reach file-scope
+ * globals, so every pointer and size the kernel uses has to be copied into a
+ * local and captured by value in the lambda.
+ */
 static void assign_cluster(void) {
     const size_t n = n_instances;
     const double *inst = d_instances;
@@ -254,6 +299,26 @@ static void assign_cluster(void) {
     });
 }
 
+/*
+ * Recomputes the centroids from the current assignments. This is the step that
+ * actually needed redesigning, because it is a reduction rather than a map.
+ * Three differences from the sequential version:
+ *
+ * 1. count_instances() is fused in. On the CPU it is a cheap extra walk over
+ *    results[]; here re-reading rows dominates, so the counts are accumulated
+ *    in the same pass as the sums.
+ * 2. Each work-item reduces a grid-stride slice into private accumulators, the
+ *    group folds those through local memory, and one slice of partials per
+ *    group goes back to the host, which sums the slices and divides. Keeping
+ *    the division on the host costs one small round trip per iteration and
+ *    avoids a second kernel.
+ * 3. The group fold is written out by hand instead of using
+ *    sycl::reduce_over_group. On AdaptiveCpp 25.02 driving gfx1101 through the
+ *    generic/SSCP path that builtin silently returns partial sums -- it lost
+ *    ~17% of a plain element count, varying between runs. The explicit tree is
+ *    correct and deterministic, so do not "simplify" it back to the builtin
+ *    without re-testing on this stack.
+ */
 static void update_centers(size_t *c) {
     const size_t n = n_instances;
     const double *inst = d_instances;
@@ -276,9 +341,10 @@ static void update_centers(size_t *c) {
                 for (size_t i = item.get_global_id(0); i < n; i += stride) {
                     const int cluster = res[i];
                     /*
-                     * Masked rather than indexed by 'cluster': it keeps every
-                     * acc[] subscript a compile-time constant, so the array
-                     * stays in registers instead of spilling to scratch.
+                     * Masked instead of indexed by 'cluster': a runtime
+                     * subscript would force acc[] out of registers and into
+                     * scratch memory. Doing K times the arithmetic to keep
+                     * every index constant is the cheaper trade here.
                      */
                     for (int j = 0; j < K; j++) {
                         const double hit = (cluster == j) ? 1.0 : 0.0;
@@ -294,7 +360,12 @@ static void update_centers(size_t *c) {
                 const size_t lid = item.get_local_id(0);
                 const size_t g = item.get_group_linear_id();
 
-                /* One tree reduction per accumulator, reusing the scratch. */
+                /*
+                 * One tree reduction per accumulator, reusing the same
+                 * scratch. Reusing it keeps local memory at one row of
+                 * doubles instead of N_ACC rows, which matters for occupancy;
+                 * the barriers are what make the reuse safe.
+                 */
                 for (int s = 0; s < N_ACC; s++) {
                     scratch[lid] = acc[s];
                     sycl::group_barrier(group);
@@ -343,7 +414,13 @@ static void update_centers(size_t *c) {
     q->wait_and_throw();
 }
 
-// Main k-means loop: initializes centers, assigns clusters, updates centers
+/*
+ * The iteration loop itself is unchanged; each step now enqueues a kernel
+ * rather than running inline. Correctness here rests on the queue being
+ * in-order (see main): the assign kernel must complete before the update
+ * kernel reads results[], and USM has no implicit dependency tracking to
+ * enforce that on its own.
+ */
 static int kmeans(void) {
     initialize_centers();
 
@@ -361,22 +438,16 @@ static int kmeans(void) {
     }
 
     /*
-     * Bring the assignments home, so the timed region ends in the same state
-     * the sequential version ends in: final labels readable on the host.
+     * Copy the assignments back before the clock stops, so the timed region
+     * ends in the same state seq.c ends in -- final labels readable on the
+     * host. Leaving them on the device would make the comparison flattering
+     * but wrong.
      */
     q->memcpy(results, d_results, n_instances * sizeof(int));
     q->wait_and_throw();
     return 1;
 }
 
-/*
- * Accuracy of an unsupervised clustering against the ground-truth labels.
- *
- * Cluster ids carry no class meaning, so each cluster is mapped to the class
- * that is most frequent among its members (majority vote); the instances that
- * agree with that mapping count as correct. This is the best accuracy
- * achievable over all cluster->class mappings.
- */
 static double evaluate_accuracy(void) {
     size_t contingency[K][N_CLASSES];
 
@@ -426,6 +497,12 @@ int main(int argc, char **argv) {
     int status = EXIT_SUCCESS;
 
     try {
+        /*
+         * in_order is required, not a preference: with USM there is no
+         * buffer/accessor graph for the runtime to order kernels from, so on
+         * the default out-of-order queue the assign and update kernels could
+         * overlap and the reduction would read half-written assignments.
+         */
         sycl::queue queue{sycl::gpu_selector_v, sycl::property::queue::in_order()};
         q= &queue;
 
