@@ -1,183 +1,291 @@
-#include <limits.h>
-#include <float.h>
-#include <math.h>
+#define _POSIX_C_SOURCE 199309L
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
+#include <string.h>
+#include <math.h>
 #include <time.h>
 
-#include "kmeans.h"
+#define K              2    /* number of clusters                              */
+#define N_ATTRIBUTES   5    /* arbitration_id,dlc,dt_id,dt,mudou               */
+#define N_CLASSES      2    /* flag_binaria is 0 or 1                          */
+#define MAX_ITERATIONS 30
+#define LINE_LIMIT     256
 
-const double K_CUTOFF = 0.05;
-const int RUNS = 30;
-const int FILE_LIMIT = 1000000;
+#define DEFAULT_DATASET "../datasets/treino_sempayload.csv"
 
-double get_monotonic_time(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
+/* Dataset: n_instances rows of N_ATTRIBUTES attributes, stored row-major. */
+static double *instances = NULL;
+/* Ground-truth class of each instance (last CSV column), used only to score. */
+static int *labels = NULL;
+/* Cluster assigned to each instance by k-means. */
+static int *results = NULL;
+static double centers[K * N_ATTRIBUTES];
 
-int parseArgs(int argc, const char** argv) {
-    int k = 0;
-    if (argc == 2) {
-        k = atoi(argv[1]);
-        if (k < 0) {
-            printf("Error: K should be a positive value!\n");
+static size_t n_instances = 0;
+
+// Counts the data rows of a CSV file, ignoring the header and blank lines
+static size_t count_rows(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "Error: could not open '%s'\n", path);
+        return (size_t)-1;
+    }
+
+    char line[LINE_LIMIT];
+    size_t rows = 0;
+
+    if (!fgets(line, sizeof(line), file)) { /* header */
+        fclose(file);
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] != '\n' && line[0] != '\r' && line[0] != '\0') {
+            rows++;
         }
     }
-    return k;
+
+    fclose(file);
+    return rows;
 }
 
-// Extract the last column as labels and exclude it from clustering features
-ArrayInt* extractLabels(Nodes* datapoints) {
-    ArrayInt* labels = newArrayInt(datapoints->n, 0);
-    for (int i = 0; i < datapoints->n; i++) {
-        int cols = datapoints->list[i].n;
-        labels->arr[i] = (int)datapoints->list[i].arr[cols - 1];
-        if (cols > 1) {
-            datapoints->list[i].n = cols - 1;
-        }
+// Loads instances and their labels from a CSV file into the global arrays
+static int load_instances(const char *path, size_t max_instances) {
+    size_t rows = count_rows(path);
+    if (rows == (size_t)-1) {
+        return 0; /* count_rows already reported the failure */
     }
-    return labels;
-}
+    if (rows == 0) {
+        fprintf(stderr, "Error: no data rows found in '%s'\n", path);
+        return 0;
+    }
+    if (max_instances > 0 && rows > max_instances) {
+        rows = max_instances;
+    }
 
-// Z-score standardize each feature so large-scale features do not dominate Euclidean distance
-void standardizeFeatures(Nodes* datapoints) {
-    if (!datapoints || datapoints->n <= 1) return;
-    int n = datapoints->n;
-    int d = datapoints->list[0].n;
+    instances = (double *)malloc(rows * N_ATTRIBUTES * sizeof(double));
+    labels = (int *)malloc(rows * sizeof(int));
+    results = (int *)malloc(rows * sizeof(int));
+    if (!instances || !labels || !results) {
+        fprintf(stderr, "Error: out of memory for %zu instances\n", rows);
+        return 0;
+    }
 
-    for (int j = 0; j < d; j++) {
-        double mean = 0.0;
-        for (int i = 0; i < n; i++) {
-            mean += datapoints->list[i].arr[j];
-        }
-        mean /= n;
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "Error: could not open '%s'\n", path);
+        return 0;
+    }
 
-        double var = 0.0;
-        for (int i = 0; i < n; i++) {
-            double diff = datapoints->list[i].arr[j] - mean;
-            var += diff * diff;
-        }
-        double stddev = sqrt(var / n);
-        if (stddev > 0.0) {
-            for (int i = 0; i < n; i++) {
-                datapoints->list[i].arr[j] = (datapoints->list[i].arr[j] - mean) / stddev;
+    char line[LINE_LIMIT];
+    size_t count = 0;
+
+    if (!fgets(line, sizeof(line), file)) { /* skip header */
+        fclose(file);
+        return 0;
+    }
+
+    while (count < rows && fgets(line, sizeof(line), file)) {
+        char *p = line;
+        int ok = 1;
+
+        for (int j = 0; j < N_ATTRIBUTES; j++) {
+            char *end = NULL;
+            double value = strtod(p, &end);
+
+            if (end == p) {
+                fprintf(stderr, "Error converting attribute %d on row %zu\n", j, count);
+                value = 0.0;
+                ok = 0;
             }
-        } else {
-            for (int i = 0; i < n; i++) {
-                datapoints->list[i].arr[j] = 0.0;
+
+            instances[count * N_ATTRIBUTES + j] = value;
+
+            p = end;
+            if (*p == ',') {
+                p++;
             }
+        }
+
+        char *end = NULL;
+        long label = strtol(p, &end, 10);
+        if (end == p || label < 0 || label >= N_CLASSES) {
+            if (ok) {
+                fprintf(stderr, "Error converting label on row %zu\n", count);
+            }
+            label = 0;
+        }
+        labels[count] = (int)label;
+
+        results[count] = -1;
+        count++;
+    }
+
+    fclose(file);
+
+    n_instances = count;
+    printf("Loaded instances: %zu\n", n_instances);
+    return count > 0;
+}
+
+static void free_instances(void) {
+    free(instances);
+    free(labels);
+    free(results);
+    instances = NULL;
+    labels = NULL;
+    results = NULL;
+}
+
+// Initializes cluster centers randomly from the loaded instances
+static void initialize_centers(void) {
+    srand(3);
+    for (int i = 0; i < K; i++) {
+        size_t index = (size_t)(rand() % (int)n_instances);
+        for (int j = 0; j < N_ATTRIBUTES; j++) {
+            centers[i * N_ATTRIBUTES + j] = instances[index * N_ATTRIBUTES + j];
         }
     }
 }
 
-// Map each cluster ID to its majority ground-truth class and count mismatches
-int evaluateClustering(const ArrayInt* labels, const ArrayInt* cluster_list, int k) {
-    int n = labels->n;
-    int* cluster_to_class = (int*)malloc(k * sizeof(int));
+// Counts the number of instances assigned to each cluster
+static void count_instances(size_t *c) {
+    for (int i = 0; i < K; i++) {
+        c[i] = 0;
+    }
+    for (size_t i = 0; i < n_instances; i++) {
+        c[results[i]]++;
+    }
+}
 
-    for (int c = 0; c < k; c++) {
+// Assigns each instance to the nearest cluster center (sequential version)
+static void assign_cluster(void) {
+    for (size_t i = 0; i < n_instances; i++) {
+        double min_dist = INFINITY;
+        int best_cluster = -1;
+
+        for (int j = 0; j < K; j++) {
+            double sum = 0.0;
+            for (int n = 0; n < N_ATTRIBUTES; n++) {
+                double diff = instances[i * N_ATTRIBUTES + n] - centers[j * N_ATTRIBUTES + n];
+                sum += diff * diff;
+            }
+
+            if (sum < min_dist) {
+                min_dist = sum;
+                best_cluster = j;
+            }
+        }
+
+        results[i] = best_cluster;
+    }
+}
+
+// Updates cluster centers based on assigned instances
+static void update_centers(size_t *c) {
+    count_instances(c);
+
+    double sum[K * N_ATTRIBUTES];
+    for (int i = 0; i < K * N_ATTRIBUTES; i++) {
+        sum[i] = 0.0;
+    }
+
+    for (size_t j = 0; j < n_instances; j++) {
+        int cluster = results[j];
+        for (int a = 0; a < N_ATTRIBUTES; a++) {
+            sum[cluster * N_ATTRIBUTES + a] += instances[j * N_ATTRIBUTES + a];
+        }
+    }
+
+    for (int i = 0; i < K; i++) {
+        for (int j = 0; j < N_ATTRIBUTES; j++) {
+            int idx = i * N_ATTRIBUTES + j;
+            centers[idx] = (c[i] != 0) ? (sum[idx] / (double)c[i]) : 0.0;
+        }
+    }
+}
+
+// Main k-means loop: initializes centers, assigns clusters, updates centers
+static void kmeans(void) {
+    initialize_centers();
+    size_t c[K];
+
+    for (int i = 0; i < MAX_ITERATIONS; i++) {
+        assign_cluster();
+        update_centers(c);
+    }
+}
+
+/*
+ * Accuracy of an unsupervised clustering against the ground-truth labels.
+ *
+ * Cluster ids carry no class meaning, so each cluster is mapped to the class
+ * that is most frequent among its members (majority vote); the instances that
+ * agree with that mapping count as correct. This is the best accuracy
+ * achievable over all cluster->class mappings.
+ */
+static double evaluate_accuracy(void) {
+    size_t contingency[K][N_CLASSES];
+
+    for (int i = 0; i < K; i++) {
+        for (int j = 0; j < N_CLASSES; j++) {
+            contingency[i][j] = 0;
+        }
+    }
+
+    for (size_t i = 0; i < n_instances; i++) {
+        int cluster = results[i];
+        if (cluster >= 0 && cluster < K) {
+            contingency[cluster][labels[i]]++;
+        }
+    }
+
+    size_t correct = 0;
+    for (int i = 0; i < K; i++) {
+        size_t best = 0;
         int best_class = 0;
-        int best_count = 0;
-
-        for (int i = 0; i < n; i++) {
-            if (cluster_list->arr[i] != c) continue;
-            int candidate = labels->arr[i];
-            int cnt = 0;
-            for (int j = i; j < n; j++) {
-                if (cluster_list->arr[j] == c && labels->arr[j] == candidate) {
-                    cnt++;
-                }
-            }
-            if (cnt > best_count) {
-                best_count = cnt;
-                best_class = candidate;
+        for (int j = 0; j < N_CLASSES; j++) {
+            if (contingency[i][j] > best) {
+                best = contingency[i][j];
+                best_class = j;
             }
         }
-        cluster_to_class[c] = best_class;
-    }
+        correct += best;
 
-    int count = 0;
-    for (int i = 0; i < n; i++) {
-        int which_class = labels->arr[i];
-        int which_cluster = cluster_list->arr[i];
-        int predicted_class = (which_cluster >= 0 && which_cluster < k) ? cluster_to_class[which_cluster] : -1;
-
-        if (which_class != predicted_class) {
-            printf("Mismatch in [%d] | class: %d vs predicted: %d (cluster %d)\n",
-                   i, which_class, predicted_class, which_cluster);
-            count++;
+        size_t total = 0;
+        for (int j = 0; j < N_CLASSES; j++) {
+            total += contingency[i][j];
         }
+        printf("Cluster %d: %zu instances -> class %d\n", i, total, best_class);
     }
 
-    free(cluster_to_class);
-    return count;
+    return (n_instances > 0) ? ((double)correct / (double)n_instances) : 0.0;
 }
 
-int main (int argc, const char** argv) {
+int main(int argc, char **argv) {
+    const char *path = (argc > 1) ? argv[1] : DEFAULT_DATASET;
+    size_t max_instances = (argc > 2) ? strtoul(argv[2], NULL, 10) : 0;
 
-    srand(time(NULL));
-
-    Nodes* datapoints = readFile("../datasets/treino_sempayload.csv", FILE_LIMIT);
-    if (!datapoints || !datapoints->list || datapoints->n == 0) {
-        fprintf(stderr, "Error: initial node configuration is NULL or empty. Aborting!\n");
-        return -1;
+    if (!load_instances(path, max_instances)) {
+        return EXIT_FAILURE;
     }
 
-    ArrayInt* labels = extractLabels(datapoints);
-    standardizeFeatures(datapoints);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    int k = parseArgs(argc, argv);
+    kmeans();
 
-    if (k > datapoints->n) {
-        fprintf(stderr, "Error: the value of K is higher than the number of entries on the dataset. Aborting!\n");
-        freeArrayInt(labels);
-        freeNodes(datapoints);
-        return -1;
-    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
 
-    KmeansResult* res = NULL;
+    double elapsed = (double)(end.tv_sec - start.tv_sec)
+                   + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 
-    clock_t t = clock();
-    double time = get_monotonic_time();
-    if (k > 0) {
-        res = min_kmeans(datapoints, k, RUNS);
-    } else if (k == 0) {
-        int cur_k = 2;
-        res = min_kmeans(datapoints, cur_k, RUNS);
-        double cost = res->cost;
+    double accuracy = evaluate_accuracy();
 
-        for (cur_k = 3; cur_k < datapoints->n; cur_k++) {
-            KmeansResult* next_res = min_kmeans(datapoints, cur_k, RUNS);
-            double new_cost = next_res->cost;
-            double relative_cost = (cost > 0.0) ? (cost - new_cost) / cost : 0.0;
+    printf("Time: %.6f s\n", elapsed);
+    printf("Accuracy: %.4f%%\n", accuracy * 100.0);
 
-            if (relative_cost < K_CUTOFF) {
-                freeKmeansResult(next_res);
-                break;
-            }
-            freeKmeansResult(res);
-            res = next_res;
-            cost = new_cost;
-        }
-    }
-    time = get_monotonic_time() - time;
-    printf("time taken: %lf\n", time);
-
-    /*
-    int num_clusters = res->clusters->n;
-    int count = evaluateClustering(labels, res->cluster_list, num_clusters);
-    printf("K: %d | Mismatches: %d / %d (Accuracy: %.2f%%)\n",
-           num_clusters, count, datapoints->n,
-           100.0 * (datapoints->n - count) / datapoints->n);
-    */
-
-
-    // Cleanup
-    freeKmeansResult(res);
-    freeArrayInt(labels);
-    freeNodes(datapoints);
-    return 0;
+    free_instances();
+    return EXIT_SUCCESS;
 }
