@@ -4,6 +4,7 @@ pkgs ? import <nixpkgs> { },
 pkgs.mkShell {
     buildInputs = with pkgs; [
         adaptivecppWithRocm
+        hyperfine
         gcc
         python313
         python313Packages.pillow

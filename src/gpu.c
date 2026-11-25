@@ -6,16 +6,16 @@
 #include <math.h>
 #include <time.h>
 
-#define K              2    /* number of clusters                              */
-#define N_ATTRIBUTES   5    /* arbitration_id,dlc,dt_id,dt,mudou               */
-#define N_CLASSES      2    /* flag_binaria is 0 or 1                          */
+#define K 2
+#define N_ATTRIBUTES 5
+#define N_CLASSES 2
 #define MAX_ITERATIONS 30
-#define LINE_LIMIT     256
+#define LINE_LIMIT 256
 
 /* Rows read from the dataset by default; override with argv[2] (0 = all). */
-#define MAX_INSTANCES  1000000
+#define MAX_INSTANCES 0
 
-#define DEFAULT_DATASET "../datasets/treino_sempayload.csv"
+#define DEFAULT_DATASET "../datasets/treino_balanced_big.csv"
 
 /* Dataset: n_instances rows of N_ATTRIBUTES attributes, stored row-major. */
 static double *instances = NULL;
@@ -58,7 +58,7 @@ static size_t count_rows(const char *path, size_t limit) {
 }
 
 // Loads instances and their labels from a CSV file into the global arrays
-static int load_instances(const char *path, size_t max_instances) {
+static int read_csv(const char *path, size_t max_instances) {
     size_t rows = count_rows(path, max_instances);
     if (rows == (size_t)-1) {
         return 0; /* count_rows already reported the failure */
@@ -158,8 +158,9 @@ static void count_instances(size_t *c) {
     for (int i = 0; i < K; i++) {
         c[i] = 0;
     }
+    #pragma omp parallel for reduction(+:c[:K])
     for (size_t i = 0; i < n_instances; i++) {
-        c[results[i]]++;
+        c[results[i]] += 1;
     }
 }
 
@@ -271,7 +272,7 @@ int main(int argc, char **argv) {
     const char *path = (argc > 1) ? argv[1] : DEFAULT_DATASET;
     size_t max_instances = (argc > 2) ? strtoul(argv[2], NULL, 10) : MAX_INSTANCES;
 
-    if (!load_instances(path, max_instances)) {
+    if (!read_csv(path, max_instances)) {
         return EXIT_FAILURE;
     }
 
