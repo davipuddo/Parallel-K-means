@@ -1,1 +1,13 @@
+# Compiled binaries
 src/main
+src/kmeans
+*.o
+*.out
+
+# Datasets: the captures are ~400 MB each and the generated benchmark set is
+# several GB. Regenerate the latter with datasets/make_benchmark_dataset.py.
+# datasets/test_dataset.txt is small and already tracked.
+datasets/*.csv
+
+# Generator scratch
+datasets/.gen.log

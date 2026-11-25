@@ -12,6 +12,9 @@
 #define MAX_ITERATIONS 30
 #define LINE_LIMIT     256
 
+/* Rows read from the dataset by default; override with argv[2] (0 = all). */
+#define MAX_INSTANCES  1000000
+
 #define DEFAULT_DATASET "../datasets/treino_sempayload.csv"
 
 /* Dataset: n_instances rows of N_ATTRIBUTES attributes, stored row-major. */
@@ -24,8 +27,12 @@ static double centers[K * N_ATTRIBUTES];
 
 static size_t n_instances = 0;
 
-// Counts the data rows of a CSV file, ignoring the header and blank lines
-static size_t count_rows(const char *path) {
+/*
+ * Counts the data rows of a CSV file, ignoring the header and blank lines.
+ * Stops as soon as 'limit' rows have been seen (limit == 0 means no limit),
+ * so capped runs do not pay for a full scan of the file.
+ */
+static size_t count_rows(const char *path, size_t limit) {
     FILE *file = fopen(path, "r");
     if (!file) {
         fprintf(stderr, "Error: could not open '%s'\n", path);
@@ -40,7 +47,7 @@ static size_t count_rows(const char *path) {
         return 0;
     }
 
-    while (fgets(line, sizeof(line), file)) {
+    while ((limit == 0 || rows < limit) && fgets(line, sizeof(line), file)) {
         if (line[0] != '\n' && line[0] != '\r' && line[0] != '\0') {
             rows++;
         }
@@ -52,16 +59,13 @@ static size_t count_rows(const char *path) {
 
 // Loads instances and their labels from a CSV file into the global arrays
 static int load_instances(const char *path, size_t max_instances) {
-    size_t rows = count_rows(path);
+    size_t rows = count_rows(path, max_instances);
     if (rows == (size_t)-1) {
         return 0; /* count_rows already reported the failure */
     }
     if (rows == 0) {
         fprintf(stderr, "Error: no data rows found in '%s'\n", path);
         return 0;
-    }
-    if (max_instances > 0 && rows > max_instances) {
-        rows = max_instances;
     }
 
     instances = (double *)malloc(rows * N_ATTRIBUTES * sizeof(double));
@@ -265,7 +269,7 @@ static double evaluate_accuracy(void) {
 
 int main(int argc, char **argv) {
     const char *path = (argc > 1) ? argv[1] : DEFAULT_DATASET;
-    size_t max_instances = (argc > 2) ? strtoul(argv[2], NULL, 10) : 0;
+    size_t max_instances = (argc > 2) ? strtoul(argv[2], NULL, 10) : MAX_INSTANCES;
 
     if (!load_instances(path, max_instances)) {
         return EXIT_FAILURE;
